@@ -1,0 +1,3 @@
+-keepattributes Signature,*Annotation*
+-dontwarn org.jetbrains.annotations.**
+-keep class com.google.zxing.** { *; }

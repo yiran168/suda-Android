@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.Qrint.Base" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <!-- Safe fallback background before edge-to-edge colors are applied at runtime. -->
+        <item name="android:navigationBarColor">#111218</item>
+        <item name="android:statusBarColor">#315DFF</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:colorAccent">#315DFF</item>
+        <item name="android:windowBackground">@color/window_bg</item>
+    </style>
+    <style name="Theme.Qrint" parent="Theme.Qrint.Base">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+    </style>
+</resources>

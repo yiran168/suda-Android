@@ -1,0 +1,14 @@
+.gradle/
+.gradle-*/
+.kotlin/
+.idea/
+local.properties
+*.iml
+app/build/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Local release signing material. Back it up securely; never commit it.
+release-signing/

@@ -1,0 +1,15 @@
+PP-OCRv6 Small detection and recognition ONNX models
+Copyright PaddlePaddle Authors
+Licensed under the Apache License, Version 2.0.
+
+Source model repositories:
+https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx
+https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx
+
+Bundled upstream files (unmodified):
+v6_small_det.onnx  SHA-256 d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e
+v6_small_rec.onnx  SHA-256 5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634
+
+This application uses ONNX Runtime for local inference. The application-side bitmap transforms,
+DB post-processing, perspective crop, ordering and CTC decode are implemented in Kotlin and do not
+bundle OpenCV or RapidOCR.

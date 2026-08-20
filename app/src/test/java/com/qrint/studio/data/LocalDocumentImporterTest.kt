@@ -1,0 +1,21 @@
+package com.qrint.studio.data
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class LocalDocumentImporterTest {
+    @Test fun textWrappingCountsChineseAsDoubleWidthAndPreservesParagraphs() {
+        val lines = wrapTextForPrint("AB中文CD\n第二段", maximumUnits = 6)
+
+        assertEquals(listOf("AB中文", "CD", "第二段"), lines)
+    }
+
+    @Test fun textWrappingNeverDropsCharacters() {
+        val source = "仓储物流-BOX-1888-2026"
+        val lines = wrapTextForPrint(source, maximumUnits = 7)
+
+        assertEquals(source, lines.joinToString(""))
+        assertTrue(lines.all(String::isNotEmpty))
+    }
+}
