@@ -5,6 +5,33 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class LocalDocumentImporterTest {
+    @Test fun concreteWordAndPowerPointExtensionsWinOverWrongExcelMime() {
+        assertEquals(
+            LocalDocumentKind.LEGACY_WORD,
+            LocalDocumentFormatDetector.detectFromMetadata("合同.doc", "application/vnd.ms-excel"),
+        )
+        assertEquals(
+            LocalDocumentKind.LEGACY_POWERPOINT,
+            LocalDocumentFormatDetector.detectFromMetadata("演示.ppt", "application/vnd.ms-excel"),
+        )
+        assertEquals(
+            LocalDocumentKind.DOCX,
+            LocalDocumentFormatDetector.detectFromMetadata("报告.docx", "application/vnd.ms-excel"),
+        )
+        assertEquals(
+            LocalDocumentKind.PPTX,
+            LocalDocumentFormatDetector.detectFromMetadata("介绍.pptx", "application/vnd.ms-excel"),
+        )
+    }
+
+    @Test fun ooxmlPackageEntriesIdentifyTheRealDocumentKind() {
+        assertEquals(LocalDocumentKind.DOCX, LocalDocumentFormatDetector.packageEntryKind("word/document.xml"))
+        assertEquals(LocalDocumentKind.PPTX, LocalDocumentFormatDetector.packageEntryKind("ppt/presentation.xml"))
+        assertEquals(LocalDocumentKind.PPTX, LocalDocumentFormatDetector.packageEntryKind("ppt/slides/slide12.xml"))
+        assertEquals(LocalDocumentKind.SPREADSHEET, LocalDocumentFormatDetector.packageEntryKind("xl/workbook.xml"))
+        assertEquals(LocalDocumentKind.UNKNOWN, LocalDocumentFormatDetector.packageEntryKind("[Content_Types].xml"))
+    }
+
     @Test fun textWrappingCountsChineseAsDoubleWidthAndPreservesParagraphs() {
         val lines = wrapTextForPrint("AB中文CD\n第二段", maximumUnits = 6)
 

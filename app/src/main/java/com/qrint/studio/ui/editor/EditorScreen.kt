@@ -209,6 +209,11 @@ fun EditorScreen(
     var documentBatch by remember(initialDocument.id) {
         mutableStateOf(initialBatchDocuments.map { it.withDeviceProfile(store.paper.value) })
     }
+    var activeDocumentPageIndex by remember(initialDocument.id) { mutableIntStateOf(0) }
+    var selectedDocumentPageIndices by remember(initialDocument.id) {
+        mutableStateOf(initialBatchDocuments.indices.toSet())
+    }
+    var showDocumentPages by remember(initialDocument.id) { mutableStateOf(initialBatchDocuments.size > 1) }
     var variableRow by remember(initialDocument.id) { mutableIntStateOf(0) }
     var variableBatchRange by remember(initialDocument.id) {
         mutableStateOf(0..(initialVariableWorkbook?.defaultSheet?.rows?.lastIndex ?: 0))
@@ -223,8 +228,32 @@ fun EditorScreen(
     // so its result can still be resolved when Android restores this editor.
     var pendingPhotoUriText by rememberSaveable(initialDocument.id) { mutableStateOf<String?>(null) }
     var launchPhotoAfterPermission by rememberSaveable(initialDocument.id) { mutableStateOf(false) }
+    var pendingPhotoCropUriText by rememberSaveable(initialDocument.id) { mutableStateOf<String?>(null) }
+    var processingPhotoCrop by remember { mutableStateOf(false) }
     var pendingDecodedCode by remember { mutableStateOf<DecodedBarcode?>(null) }
     var pendingCodeMatches by remember { mutableStateOf<List<CodeTemplateMatch>>(emptyList()) }
+
+    fun currentDocumentPages(): List<LabelDocument> = mergeActiveDocumentPage(
+        pages = documentBatch,
+        activeIndex = activeDocumentPageIndex,
+        activeDocument = session.document,
+    )
+
+    fun openDocumentPage(requestedIndex: Int) {
+        if (documentBatch.isEmpty()) return
+        val savedPages = currentDocumentPages()
+        val nextIndex = requestedIndex.coerceIn(savedPages.indices)
+        documentBatch = savedPages
+        activeDocumentPageIndex = nextIndex
+        session.openDocument(savedPages[nextIndex])
+    }
+
+    fun clearDocumentPages() {
+        documentBatch = emptyList()
+        activeDocumentPageIndex = 0
+        selectedDocumentPageIndices = emptySet()
+        showDocumentPages = false
+    }
 
     LaunchedEffect(initialVariableWorkbook?.defaultSheet?.sheetName, initialVariableWorkbook?.defaultSheet?.rows?.size) {
         initialVariableWorkbook?.defaultSheet?.let { sheet ->
@@ -278,6 +307,15 @@ fun EditorScreen(
         }
     }
 
+    fun addCapturedPhoto(uri: Uri, message: String) {
+        workScope.launch {
+            val base = EditorFactories.imageElement(uri.toString(), y = nextY(session.document))
+            val dimensions = withContext(Dispatchers.IO) { ImageLoader.dimensions(context, uri.toString()) }
+            session.add(dimensions?.let { source -> fitImageToSource(base, source, session.document) } ?: base)
+            snackbar.showSnackbar(message)
+        }
+    }
+
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
             runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
@@ -308,10 +346,8 @@ fun EditorScreen(
             } else workScope.launch {
                 val validation = withContext(Dispatchers.IO) { CapturedMediaStore.validateImage(context, uri) }
                 validation.onSuccess {
-                    val base = EditorFactories.imageElement(uri.toString(), y = nextY(session.document))
-                    val dimensions = withContext(Dispatchers.IO) { ImageLoader.dimensions(context, uri.toString()) }
-                    session.add(dimensions?.let { source -> fitImageToSource(base, source, session.document) } ?: base)
-                    snackbar.showSnackbar("照片已加入画布")
+                    pendingPhotoCropUriText = uri.toString()
+                    snackbar.showSnackbar("拍照完成，请选择整张照片或圈选打印区域")
                 }.onFailure { error ->
                     CapturedMediaStore.delete(context, uri)
                     snackbar.showSnackbar("拍照结果无效：${error.message ?: "无法读取照片"}")
@@ -349,7 +385,7 @@ fun EditorScreen(
                     }.fold(onSuccess = store::importDocument, onFailure = { Result.failure(it) })
                 }
                 imported.onSuccess { document ->
-                    documentBatch = emptyList()
+                    clearDocumentPages()
                     session.setDocument(document.withDeviceProfile(store.paper.value))
                     snackbar.showSnackbar("模板已导入")
                 }.onFailure { error -> snackbar.showSnackbar("导入失败：${error.message}") }
@@ -382,7 +418,7 @@ fun EditorScreen(
                         "${workbook.sourceName} · ${table.rows.size} 行 · ${table.headers.size} 列 · ${workbook.sheets.size} 个工作表",
                         RuntimeLogCategory.CONTENT,
                     )
-                    documentBatch = emptyList()
+                    clearDocumentPages()
                     variableWorkbook = workbook
                     variableData = table
                     variableRow = 0
@@ -439,12 +475,15 @@ fun EditorScreen(
                 imported.onSuccess { batch ->
                     val calibrated = batch.documents.map { it.withDeviceProfile(store.paper.value) }
                     documentBatch = calibrated
+                    activeDocumentPageIndex = 0
+                    selectedDocumentPageIndices = calibrated.indices.toSet()
+                    showDocumentPages = calibrated.size > 1
                     variableWorkbook = null
                     variableData = null
                     variableRow = 0
                     variableBatchRange = 0..0
-                    session.setDocument(calibrated.first())
-                    snackbar.showSnackbar("已导入 ${batch.documents.size} 页；最终预览会按页打印")
+                    session.openDocument(calibrated.first())
+                    snackbar.showSnackbar("已导入 ${batch.documents.size} 页；可逐页编辑并选择全部或指定页打印")
                 }.onFailure { error -> snackbar.showSnackbar("文档导入失败：${error.message}") }
             }
         }
@@ -472,6 +511,12 @@ fun EditorScreen(
         variableData?.let { table ->
             queryVariableRows(table, variableFilter, variableSortField, variableSortAscending)
         }.orEmpty()
+    }
+
+    LaunchedEffect(session.document, activeDocumentPageIndex, documentBatch.size) {
+        if (documentBatch.isNotEmpty() && activeDocumentPageIndex in documentBatch.indices) {
+            documentBatch = mergeActiveDocumentPage(documentBatch, activeDocumentPageIndex, session.document)
+        }
     }
 
     // Continuous paper grows from the exact Android text layout used by LabelRenderer. Debouncing
@@ -647,6 +692,10 @@ fun EditorScreen(
                             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            "application/msword",
+                            "application/vnd.ms-powerpoint",
+                            "application/x-wps",
+                            "application/x-dps",
                             "application/vnd.ms-excel",
                             "application/octet-stream",
                         ),
@@ -671,7 +720,18 @@ fun EditorScreen(
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = { if (rendered != null) showPreview = true },
+                onClick = {
+                    if (rendered == null) return@ExtendedFloatingActionButton
+                    if (documentBatch.isNotEmpty()) {
+                        val firstSelected = selectedDocumentPageIndices.minOrNull()
+                        if (firstSelected == null) {
+                            workScope.launch { snackbar.showSnackbar("请至少选择一页再进入最终预览") }
+                            return@ExtendedFloatingActionButton
+                        }
+                        if (activeDocumentPageIndex != firstSelected) openDocumentPage(firstSelected)
+                    }
+                    showPreview = true
+                },
                 icon = { Icon(Icons.Rounded.Print, null) },
                 text = { Text("最终预览") },
             )
@@ -722,11 +782,12 @@ fun EditorScreen(
                     if (documentBatch.size > 1) {
                         Spacer(Modifier.width(7.dp))
                         Surface(
+                            onClick = { showDocumentPages = !showDocumentPages },
                             shape = MaterialTheme.shapes.medium,
                             color = MaterialTheme.colorScheme.tertiaryContainer,
                         ) {
                             Text(
-                                "文档 1/${documentBatch.size}",
+                                "文档 ${activeDocumentPageIndex + 1}/${documentBatch.size}",
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                 style = MaterialTheme.typography.labelSmall,
                             )
@@ -738,6 +799,26 @@ fun EditorScreen(
                         Spacer(Modifier.width(5.dp))
                         Text("本地识字中", style = MaterialTheme.typography.labelSmall)
                     }
+                }
+
+                AnimatedVisibility(
+                    visible = documentBatch.size > 1 && showDocumentPages,
+                    enter = fadeIn(tween(180)) + expandVertically(tween(260, easing = FastOutSlowInEasing)),
+                    exit = fadeOut(tween(120)) + shrinkVertically(tween(220, easing = FastOutSlowInEasing)),
+                ) {
+                    DocumentPagePanel(
+                        pageCount = documentBatch.size,
+                        activeIndex = activeDocumentPageIndex,
+                        selectedIndices = selectedDocumentPageIndices,
+                        onOpenPage = ::openDocumentPage,
+                        onTogglePage = { index ->
+                            selectedDocumentPageIndices = if (index in selectedDocumentPageIndices) {
+                                selectedDocumentPageIndices - index
+                            } else selectedDocumentPageIndices + index
+                        },
+                        onSelectAll = { selectedDocumentPageIndices = documentBatch.indices.toSet() },
+                        onClearSelection = { selectedDocumentPageIndices = emptySet() },
+                    )
                 }
 
                 StickyEditorPreview(
@@ -830,12 +911,12 @@ fun EditorScreen(
 
     if (showPreview) rendered?.let { preview ->
         val selectedBatchRows = variableRowsIn(variableViewRows, variableBatchRange)
-        val pageDocuments = if (documentBatch.isEmpty()) emptyList()
-        else listOf(session.document) + documentBatch.drop(1)
+        val pageDocuments = selectedDocumentPages(currentDocumentPages(), selectedDocumentPageIndices)
+        val printDocument = pageDocuments.firstOrNull() ?: previewDocument
         PrintPreviewSheet(
-            document = previewDocument,
+            document = printDocument,
             rendered = preview,
-            batchSourceDocument = session.document.takeIf { variableData != null },
+            batchSourceDocument = session.document.takeIf { variableData != null && documentBatch.isEmpty() },
             batchRows = selectedBatchRows,
             batchDocuments = pageDocuments,
             printer = printer,
@@ -969,6 +1050,43 @@ fun EditorScreen(
             onDismiss = { showProductLibrary = false },
         )
     }
+    pendingPhotoCropUriText?.let { uriText ->
+        val capturedUri = Uri.parse(uriText)
+        PhotoCropSheet(
+            uri = capturedUri,
+            processing = processingPhotoCrop,
+            onUseAll = {
+                if (!processingPhotoCrop) {
+                    pendingPhotoCropUriText = null
+                    addCapturedPhoto(capturedUri, "整张照片已加入画布")
+                }
+            },
+            onUseCrop = { region ->
+                if (!processingPhotoCrop) {
+                    processingPhotoCrop = true
+                    workScope.launch {
+                        val cropped = withContext(Dispatchers.IO) {
+                            CapturedPhotoCropper.crop(context, capturedUri, region)
+                        }
+                        cropped.onSuccess { croppedUri ->
+                            CapturedMediaStore.delete(context, capturedUri)
+                            pendingPhotoCropUriText = null
+                            addCapturedPhoto(croppedUri, "圈选区域已加入画布")
+                        }.onFailure { error ->
+                            snackbar.showSnackbar("照片裁切失败：${error.message ?: "无法读取照片"}")
+                        }
+                        processingPhotoCrop = false
+                    }
+                }
+            },
+            onDismiss = {
+                if (!processingPhotoCrop) {
+                    CapturedMediaStore.delete(context, capturedUri)
+                    pendingPhotoCropUriText = null
+                }
+            },
+        )
+    }
     liveCameraMode?.let { mode ->
         LiveCameraStudio(
             mode = mode,
@@ -1003,7 +1121,7 @@ fun EditorScreen(
             product = product,
             matches = pendingCodeMatches,
             onUseTemplate = { match ->
-                documentBatch = emptyList()
+                clearDocumentPages()
                 variableWorkbook = null
                 variableData = null
                 session.setDocument(

@@ -21,8 +21,8 @@ android {
         applicationId = "com.qrint.studio"
         minSdk = 24
         targetSdk = 36
-        versionCode = 27
-        versionName = "2.5.7"
+        versionCode = 28
+        versionName = "2.5.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

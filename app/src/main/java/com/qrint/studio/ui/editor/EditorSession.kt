@@ -447,6 +447,17 @@ class EditorSession(
 
     fun setDocument(next: LabelDocument, recordUndo: Boolean = true) = commit(next, recordUndo)
 
+    /** Opens another independent document/page without allowing undo to cross page boundaries. */
+    fun openDocument(next: LabelDocument) {
+        endTransform()
+        undo.clear()
+        redo.clear()
+        document = next.normalized()
+        selectedId = document.elements.lastOrNull()?.id
+        selectedIds = selectedId?.let(::groupSelection).orEmpty()
+        snapGuides = SnapGuides()
+    }
+
     fun undo() {
         endTransform()
         if (undo.isEmpty()) return

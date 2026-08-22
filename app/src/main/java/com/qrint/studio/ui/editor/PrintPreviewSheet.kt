@@ -142,7 +142,9 @@ fun PrintPreviewSheet(
     }
 
     ModalBottomSheet(
-        onDismissRequest = { if (!printing) onDismiss() },
+        // A row-level checkpoint is valuable only while its task stays alive. Force an explicit
+        // "continue" or "end" choice instead of letting a swipe accidentally discard the cursor.
+        onDismissRequest = { if (!printing && resumeCursor == null) onDismiss() },
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         shape = RoundedCornerShape(topStart = 32.dp, topEnd = 32.dp),
     ) {

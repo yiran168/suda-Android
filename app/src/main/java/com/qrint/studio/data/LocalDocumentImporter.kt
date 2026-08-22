@@ -42,24 +42,26 @@ object LocalDocumentImporter {
         mimeType: String?,
         paper: PaperSettings,
     ): Result<ImportedDocumentBatch> {
-        val name = sourceName.lowercase()
-        val mime = mimeType.orEmpty().lowercase()
-        return when {
-            name.endsWith(".pdf") || mime == "application/pdf" ->
+        return when (LocalDocumentFormatDetector.inspect(context, uri, sourceName, mimeType)) {
+            LocalDocumentKind.PDF ->
                 importPdf(context, uri, sourceName, paper)
-            name.endsWith(".docx") || mime == DOCX_MIME ->
+            LocalDocumentKind.DOCX ->
                 OfficeDocumentImporter.importDocx(context, uri, sourceName, paper)
-            name.endsWith(".pptx") || mime == PPTX_MIME ->
+            LocalDocumentKind.PPTX ->
                 OfficeDocumentImporter.importPptx(context, uri, sourceName, paper)
-            name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".et") ||
-                mime == XLSX_MIME || mime == XLS_MIME ->
+            LocalDocumentKind.SPREADSHEET ->
                 OfficeDocumentImporter.importSpreadsheet(context, uri, sourceName, paper)
-            name.endsWith(".txt") || name.endsWith(".md") || mime == "text/plain" || mime == "text/markdown" ->
+            LocalDocumentKind.TEXT ->
                 importPlainText(context, uri, sourceName, paper)
-            name.endsWith(".doc") || name.endsWith(".ppt") -> Result.failure(
-                IllegalArgumentException("旧版 .doc/.ppt 不包含可靠的开放排版结构，请先在 Word/WPS 中另存为 .docx/.pptx"),
+            LocalDocumentKind.LEGACY_WORD -> Result.failure(
+                IllegalArgumentException("这是旧版 Word/WPS 文档（.doc/.wps），请先在 Word/WPS 中另存为 .docx 后导入；应用不会再把它误当成 Excel。"),
             )
-            else -> Result.failure(IllegalArgumentException("不支持的文档格式：$sourceName"))
+            LocalDocumentKind.LEGACY_POWERPOINT -> Result.failure(
+                IllegalArgumentException("这是旧版 PowerPoint/WPS 演示文稿（.ppt/.dps），请先另存为 .pptx 后导入；应用不会再把它误当成 Excel。"),
+            )
+            LocalDocumentKind.UNKNOWN -> Result.failure(
+                IllegalArgumentException("无法识别文档格式：$sourceName；请确认文件未损坏且扩展名正确。"),
+            )
         }
     }
 
@@ -211,10 +213,6 @@ object LocalDocumentImporter {
         }
     }
 
-    private const val DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    private const val PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    private const val XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    private const val XLS_MIME = "application/vnd.ms-excel"
 }
 
 internal fun wrapTextForPrint(text: String, maximumUnits: Int): List<String> {

@@ -44,7 +44,13 @@ object OfficeDocumentImporter {
         val builder = FlowDocumentBuilder(sourceName, paper)
         body.childElements().forEach { block ->
             when (block.local()) {
-                "p" -> addWordParagraph(context, zip, relationships, block, builder)
+                "p" -> {
+                    if (block.firstDescendant("pageBreakBefore") != null) builder.forcePageBreak()
+                    addWordParagraph(context, zip, relationships, block, builder)
+                    val explicitPageBreak = block.descendants("br").any { it.attribute("type") == "page" } ||
+                        block.firstDescendant("lastRenderedPageBreak") != null
+                    if (explicitPageBreak) builder.forcePageBreak()
+                }
                 "tbl" -> addWordTable(block, builder)
             }
         }
@@ -367,6 +373,9 @@ object OfficeDocumentImporter {
         fun addVerticalSpace(dots: Int) {
             if (y + dots >= limit - bottomPadding) flush() else y += dots.coerceAtLeast(0)
         }
+
+        /** Preserves explicit Word page boundaries in addition to thermal-paper pagination. */
+        fun forcePageBreak() = flush()
 
         fun finish(): List<LabelDocument> {
             flush()
