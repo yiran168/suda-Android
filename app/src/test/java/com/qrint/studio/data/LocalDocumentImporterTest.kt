@@ -32,6 +32,34 @@ class LocalDocumentImporterTest {
         assertEquals(LocalDocumentKind.UNKNOWN, LocalDocumentFormatDetector.packageEntryKind("[Content_Types].xml"))
     }
 
+    @Test fun oleStreamNamesOverrideMisleadingExcelMetadata() {
+        val word = "WordDocument\u0000".toByteArray(Charsets.UTF_16LE)
+        val powerPoint = "PowerPoint Document\u0000".toByteArray(Charsets.UTF_16LE)
+        val workbook = "Workbook\u0000".toByteArray(Charsets.UTF_16LE)
+
+        assertEquals(
+            LocalDocumentKind.LEGACY_WORD,
+            LocalDocumentFormatDetector.detectOleStreamEvidence(word).kind(),
+        )
+        assertEquals(
+            LocalDocumentKind.LEGACY_POWERPOINT,
+            LocalDocumentFormatDetector.detectOleStreamEvidence(powerPoint).kind(),
+        )
+        assertEquals(
+            LocalDocumentKind.SPREADSHEET,
+            LocalDocumentFormatDetector.detectOleStreamEvidence(workbook).kind(),
+        )
+    }
+
+    @Test fun encryptedOfficeContainerIsNotSentToSpreadsheetParser() {
+        val bytes = "EncryptedPackage\u0000Workbook\u0000".toByteArray(Charsets.UTF_16LE)
+
+        assertEquals(
+            LocalDocumentKind.ENCRYPTED_OFFICE,
+            LocalDocumentFormatDetector.detectOleStreamEvidence(bytes).kind(),
+        )
+    }
+
     @Test fun textWrappingCountsChineseAsDoubleWidthAndPreservesParagraphs() {
         val lines = wrapTextForPrint("AB中文CD\n第二段", maximumUnits = 6)
 

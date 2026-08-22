@@ -1061,17 +1061,17 @@ fun EditorScreen(
                     addCapturedPhoto(capturedUri, "整张照片已加入画布")
                 }
             },
-            onUseCrop = { region ->
+            onUseCrop = { selection ->
                 if (!processingPhotoCrop) {
                     processingPhotoCrop = true
                     workScope.launch {
                         val cropped = withContext(Dispatchers.IO) {
-                            CapturedPhotoCropper.crop(context, capturedUri, region)
+                            CapturedPhotoCropper.cropFreehand(context, capturedUri, selection)
                         }
                         cropped.onSuccess { croppedUri ->
                             CapturedMediaStore.delete(context, capturedUri)
                             pendingPhotoCropUriText = null
-                            addCapturedPhoto(croppedUri, "圈选区域已加入画布")
+                            addCapturedPhoto(croppedUri, "手绘圈选区域已加入画布")
                         }.onFailure { error ->
                             snackbar.showSnackbar("照片裁切失败：${error.message ?: "无法读取照片"}")
                         }

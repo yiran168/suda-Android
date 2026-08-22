@@ -53,11 +53,12 @@ object LocalDocumentImporter {
                 OfficeDocumentImporter.importSpreadsheet(context, uri, sourceName, paper)
             LocalDocumentKind.TEXT ->
                 importPlainText(context, uri, sourceName, paper)
-            LocalDocumentKind.LEGACY_WORD -> Result.failure(
-                IllegalArgumentException("这是旧版 Word/WPS 文档（.doc/.wps），请先在 Word/WPS 中另存为 .docx 后导入；应用不会再把它误当成 Excel。"),
-            )
-            LocalDocumentKind.LEGACY_POWERPOINT -> Result.failure(
-                IllegalArgumentException("这是旧版 PowerPoint/WPS 演示文稿（.ppt/.dps），请先另存为 .pptx 后导入；应用不会再把它误当成 Excel。"),
+            LocalDocumentKind.LEGACY_WORD ->
+                OfficeDocumentImporter.importLegacyWord(context, uri, sourceName, paper)
+            LocalDocumentKind.LEGACY_POWERPOINT ->
+                OfficeDocumentImporter.importLegacyPowerPoint(context, uri, sourceName, paper)
+            LocalDocumentKind.ENCRYPTED_OFFICE -> Result.failure(
+                IllegalArgumentException("该 Office/WPS 文档已加密，请先在原应用中解除密码保护后再导入。"),
             )
             LocalDocumentKind.UNKNOWN -> Result.failure(
                 IllegalArgumentException("无法识别文档格式：$sourceName；请确认文件未损坏且扩展名正确。"),

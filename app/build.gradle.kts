@@ -21,8 +21,8 @@ android {
         applicationId = "com.qrint.studio"
         minSdk = 24
         targetSdk = 36
-        versionCode = 28
-        versionName = "2.5.8"
+        versionCode = 29
+        versionName = "2.5.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -110,6 +110,9 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
     implementation("androidx.camera:camera-view:$cameraXVersion")
     implementation("com.google.zxing:core:3.5.3")
+    // Apache POI 5.5.1, rebuilt from poi-on-android with relocated XML/AWT shims. It is loaded
+    // only for legacy OLE Word/PowerPoint documents; modern OOXML stays on our bounded parser.
+    implementation(files("libs/poishadow-5.5.1-android.jar"))
     // Isolated legacy BIFF reader for Excel .xls and compatible WPS .et files. Modern .xlsx is
     // still parsed by our bounded local reader, keeping the old dependency off the main path.
     implementation("net.sourceforge.jexcelapi:jxl:2.6.12")

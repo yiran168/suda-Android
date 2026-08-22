@@ -2,6 +2,10 @@ package com.qrint.studio.ui.editor
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Path
 import android.net.Uri
 import com.qrint.studio.data.CapturedMediaStore
 import com.qrint.studio.render.ImageLoader
@@ -24,15 +28,39 @@ internal object CapturedPhotoCropper {
         )
     }
 
-    fun crop(context: Context, uri: Uri, region: CameraScanRegion): Result<Uri> = runCatching {
+    fun cropFreehand(
+        context: Context,
+        uri: Uri,
+        selection: FreehandPhotoSelection,
+    ): Result<Uri> = runCatching {
+        require(selection.isUsable) { "请先用手指沿要打印的内容画一圈" }
         val source = loadPreview(context, uri) ?: error("无法读取拍摄的照片")
-        var cropped: Bitmap? = null
+        var output: Bitmap? = null
         try {
-            val bounds = region.toPixelCrop(source.width, source.height)
-            cropped = Bitmap.createBitmap(source, bounds.left, bounds.top, bounds.width, bounds.height)
-            CapturedMediaStore.saveBitmap(context, cropped, "photo-crop").getOrThrow()
+            val bounds = selection.pixelBounds(source.width, source.height)
+            output = Bitmap.createBitmap(bounds.width, bounds.height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(output)
+            canvas.drawColor(Color.WHITE)
+            val clip = Path().apply {
+                selection.points.forEachIndexed { index, point ->
+                    val x = point.x * source.width - bounds.left
+                    val y = point.y * source.height - bounds.top
+                    if (index == 0) moveTo(x, y) else lineTo(x, y)
+                }
+                close()
+            }
+            val checkpoint = canvas.save()
+            canvas.clipPath(clip)
+            canvas.drawBitmap(
+                source,
+                -bounds.left.toFloat(),
+                -bounds.top.toFloat(),
+                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG),
+            )
+            canvas.restoreToCount(checkpoint)
+            CapturedMediaStore.saveBitmap(context, output, "photo-lasso").getOrThrow()
         } finally {
-            cropped?.takeIf { it !== source && !it.isRecycled }?.recycle()
+            output?.takeIf { it !== source && !it.isRecycled }?.recycle()
             if (!source.isRecycled) source.recycle()
         }
     }

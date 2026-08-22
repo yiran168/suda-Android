@@ -3,6 +3,7 @@ package com.qrint.studio.data
 import android.content.Context
 import android.net.Uri
 import java.io.BufferedInputStream
+import java.nio.charset.StandardCharsets
 import java.util.zip.ZipInputStream
 
 /**
@@ -17,8 +18,31 @@ internal enum class LocalDocumentKind {
     SPREADSHEET,
     LEGACY_WORD,
     LEGACY_POWERPOINT,
+    ENCRYPTED_OFFICE,
     TEXT,
     UNKNOWN,
+}
+
+internal data class OleStreamEvidence(
+    val wordDocument: Boolean = false,
+    val powerPointDocument: Boolean = false,
+    val workbook: Boolean = false,
+    val encryptedPackage: Boolean = false,
+) {
+    operator fun plus(other: OleStreamEvidence): OleStreamEvidence = OleStreamEvidence(
+        wordDocument = wordDocument || other.wordDocument,
+        powerPointDocument = powerPointDocument || other.powerPointDocument,
+        workbook = workbook || other.workbook,
+        encryptedPackage = encryptedPackage || other.encryptedPackage,
+    )
+
+    fun kind(): LocalDocumentKind = when {
+        encryptedPackage -> LocalDocumentKind.ENCRYPTED_OFFICE
+        wordDocument -> LocalDocumentKind.LEGACY_WORD
+        powerPointDocument -> LocalDocumentKind.LEGACY_POWERPOINT
+        workbook -> LocalDocumentKind.SPREADSHEET
+        else -> LocalDocumentKind.UNKNOWN
+    }
 }
 
 internal object LocalDocumentFormatDetector {
@@ -42,7 +66,7 @@ internal object LocalDocumentFormatDetector {
             header.startsWithBytes(byteArrayOf(0x50, 0x4B, 0x03, 0x04)) ||
                 header.startsWithBytes(byteArrayOf(0x50, 0x4B, 0x05, 0x06)) ||
                 header.startsWithBytes(byteArrayOf(0x50, 0x4B, 0x07, 0x08)) -> inspectZip(context, uri)
-            header.startsWithBytes(oleSignature) -> legacyKind(sourceName, mimeType)
+            header.startsWithBytes(oleSignature) -> inspectOle(context, uri, sourceName, mimeType)
             else -> LocalDocumentKind.UNKNOWN
         }
         return if (signatureKind != LocalDocumentKind.UNKNOWN) signatureKind
@@ -97,6 +121,51 @@ internal object LocalDocumentFormatDetector {
         }
     }
 
+    /**
+     * OLE/CFB providers frequently report Word and PowerPoint files as `application/vnd.ms-excel`.
+     * Stream names are stored in the compound file itself, so they are a stronger discriminator
+     * than either the display name or MIME type. The probe is streaming and bounded to avoid a
+     * second full-document allocation before the real importer runs.
+     */
+    private fun inspectOle(
+        context: Context,
+        uri: Uri,
+        sourceName: String,
+        mimeType: String?,
+    ): LocalDocumentKind {
+        val streamKind = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                val buffer = ByteArray(OLE_PROBE_CHUNK_BYTES)
+                var carry = ByteArray(0)
+                var evidence = OleStreamEvidence()
+                var total = 0L
+                while (total < MAX_OLE_PROBE_BYTES) {
+                    val maximumRead = minOf(buffer.size.toLong(), MAX_OLE_PROBE_BYTES - total).toInt()
+                    val read = input.read(buffer, 0, maximumRead)
+                    if (read < 0) break
+                    if (read == 0) break
+                    total += read
+                    val probe = ByteArray(carry.size + read)
+                    carry.copyInto(probe)
+                    buffer.copyInto(probe, destinationOffset = carry.size, endIndex = read)
+                    evidence += detectOleStreamEvidence(probe)
+                    val carryStart = (probe.size - OLE_PROBE_OVERLAP_BYTES).coerceAtLeast(0)
+                    carry = probe.copyOfRange(carryStart, probe.size)
+                }
+                evidence.kind()
+            } ?: LocalDocumentKind.UNKNOWN
+        }.getOrDefault(LocalDocumentKind.UNKNOWN)
+        return if (streamKind != LocalDocumentKind.UNKNOWN) streamKind
+        else legacyKind(sourceName, mimeType)
+    }
+
+    internal fun detectOleStreamEvidence(bytes: ByteArray): OleStreamEvidence = OleStreamEvidence(
+        wordDocument = bytes.containsAnyEncoding("WordDocument"),
+        powerPointDocument = bytes.containsAnyEncoding("PowerPoint Document"),
+        workbook = bytes.containsAnyEncoding("Workbook") || bytes.containsAnyEncoding("Book"),
+        encryptedPackage = bytes.containsAnyEncoding("EncryptedPackage"),
+    )
+
     private fun legacyKind(sourceName: String, mimeType: String?): LocalDocumentKind =
         detectFromMetadata(sourceName, mimeType).takeIf {
             it == LocalDocumentKind.LEGACY_WORD ||
@@ -110,7 +179,25 @@ internal object LocalDocumentFormatDetector {
     private fun ByteArray.startsWithBytes(value: ByteArray): Boolean =
         size >= value.size && value.indices.all { this[it] == value[it] }
 
+    private fun ByteArray.containsAnyEncoding(value: String): Boolean =
+        containsSequence(value.toByteArray(StandardCharsets.UTF_16LE)) ||
+            containsSequence(value.toByteArray(StandardCharsets.US_ASCII))
+
+    private fun ByteArray.containsSequence(sequence: ByteArray): Boolean {
+        if (sequence.isEmpty() || size < sequence.size) return false
+        val lastStart = size - sequence.size
+        for (start in 0..lastStart) {
+            var index = 0
+            while (index < sequence.size && this[start + index] == sequence[index]) index++
+            if (index == sequence.size) return true
+        }
+        return false
+    }
+
     private const val MAX_ZIP_ENTRIES = 4_096
+    private const val MAX_OLE_PROBE_BYTES = 96L * 1024L * 1024L
+    private const val OLE_PROBE_CHUNK_BYTES = 64 * 1024
+    private const val OLE_PROBE_OVERLAP_BYTES = 128
     private const val DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     private const val PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     private val spreadsheetMimes = setOf(

@@ -21,6 +21,14 @@ import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
+import org.apache.poi.hslf.usermodel.HSLFGroupShape
+import org.apache.poi.hslf.usermodel.HSLFPictureShape
+import org.apache.poi.hslf.usermodel.HSLFShape
+import org.apache.poi.hslf.usermodel.HSLFSlideShow
+import org.apache.poi.hslf.usermodel.HSLFTextShape
+import org.apache.poi.hwpf.HWPFDocument
+import org.apache.poi.hwpf.usermodel.Paragraph
+import org.apache.poi.hwpf.usermodel.Table
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 
@@ -89,6 +97,105 @@ object OfficeDocumentImporter {
         ImportedDocumentBatch(sourceName, documents)
     }
 
+    /**
+     * Imports binary Word 97-2003/WPS documents with the Android-adapted Apache POI reader.
+     * Paragraphs, tables, page breaks, basic run styling and supported raster pictures remain
+     * separate editable elements. Unsupported OLE objects are deliberately ignored instead of
+     * crashing the whole import.
+     */
+    fun importLegacyWord(
+        context: Context,
+        uri: Uri,
+        sourceName: String,
+        paper: PaperSettings,
+    ): Result<ImportedDocumentBatch> = runCatching {
+        ByteArrayInputStream(readUri(context, uri)).use { stream ->
+            HWPFDocument(stream).use { document ->
+                val range = document.range
+                val pictures = document.picturesTable
+                val builder = FlowDocumentBuilder(sourceName, paper)
+                var paragraphIndex = 0
+                while (paragraphIndex < range.numParagraphs()) {
+                    val paragraph = range.getParagraph(paragraphIndex)
+                    if (paragraph.pageBreakBefore()) builder.forcePageBreak()
+                    if (paragraph.isInTable && paragraph.tableLevel == 1) {
+                        val table = range.getTable(paragraph)
+                        addLegacyWordTable(table, builder)
+                        val tableEnd = table.endOffset
+                        do {
+                            paragraphIndex++
+                        } while (
+                            paragraphIndex < range.numParagraphs() &&
+                            range.getParagraph(paragraphIndex).startOffset < tableEnd
+                        )
+                        continue
+                    }
+
+                    addLegacyWordParagraph(paragraph, builder)
+                    for (runIndex in 0 until paragraph.numCharacterRuns()) {
+                        val run = paragraph.getCharacterRun(runIndex)
+                        if (!pictures.hasPicture(run)) continue
+                        val picture = runCatching { pictures.extractPicture(run, true) }.getOrNull() ?: continue
+                        val bytes = picture.content ?: continue
+                        val extension = picture.suggestFileExtension().orEmpty().lowercase()
+                        if (extension !in SUPPORTED_RASTER_EXTENSIONS) continue
+                        val imageUri = CapturedMediaStore.saveImageBytes(
+                            context,
+                            bytes,
+                            extension,
+                            "legacy-word-media",
+                        ).getOrNull() ?: continue
+                        builder.addImage(imageUri, bytes)
+                    }
+                    if (paragraph.text().contains('\u000c')) builder.forcePageBreak()
+                    paragraphIndex++
+                }
+                ImportedDocumentBatch(sourceName, builder.finish())
+            }
+        }
+    }
+
+    /** One editable document per slide (or continuation page on very short labels). */
+    fun importLegacyPowerPoint(
+        context: Context,
+        uri: Uri,
+        sourceName: String,
+        paper: PaperSettings,
+    ): Result<ImportedDocumentBatch> = runCatching {
+        ByteArrayInputStream(readUri(context, uri)).use { stream ->
+            HSLFSlideShow(stream).use { show ->
+                val slides = show.slides.take(MAX_PAGES)
+                require(slides.isNotEmpty()) { "旧版 PowerPoint/WPS 文稿中没有幻灯片" }
+                val imported = slides.flatMapIndexed { slideIndex, slide ->
+                    val slideTitle = "$sourceName · 幻灯片 ${slideIndex + 1}/${slides.size}"
+                    val builder = FlowDocumentBuilder(slideTitle, paper)
+                    var added = false
+                    slide.shapes.forEach { shape ->
+                        if (addLegacyPowerPointShape(context, shape, builder)) added = true
+                    }
+                    if (!added) {
+                        builder.addParagraph(
+                            text = "（空白幻灯片）",
+                            fontSize = 24f,
+                            weight = 400,
+                            italic = false,
+                            underline = false,
+                            alignment = TextAlignment.CENTER,
+                            afterDots = 0,
+                        )
+                    }
+                    builder.finish().mapIndexed { continuation, document ->
+                        document.copy(
+                            title = if (continuation == 0) slideTitle else "$slideTitle · 续 ${continuation + 1}",
+                        )
+                    }
+                }
+                require(imported.size <= MAX_PAGES) { "PowerPoint 分页超过 $MAX_PAGES 页，请拆分文稿" }
+                ImportedDocumentBatch(sourceName, imported)
+            }
+        }
+    }
+
     fun importSpreadsheet(
         context: Context,
         uri: Uri,
@@ -133,6 +240,110 @@ object OfficeDocumentImporter {
         }
         require(documents.isNotEmpty()) { "Excel / WPS 表格没有可打印内容" }
         ImportedDocumentBatch(sourceName, documents)
+    }
+
+    private fun addLegacyWordParagraph(paragraph: Paragraph, builder: FlowDocumentBuilder) {
+        val text = paragraph.text().cleanLegacyOfficeText()
+        val firstRun = (0 until paragraph.numCharacterRuns())
+            .asSequence()
+            .map(paragraph::getCharacterRun)
+            .firstOrNull { it.text().cleanLegacyOfficeText().isNotBlank() }
+        val fontSize = firstRun?.fontSize
+            ?.takeIf { it > 0 }
+            ?.let { halfPoints -> halfPoints / 2f * builder.paper.dpi / 72f }
+            ?.coerceIn(12f, 96f)
+            ?: 28f
+        if (text.isBlank()) {
+            builder.addVerticalSpace((fontSize * 0.55f).roundToInt())
+            return
+        }
+        val alignment = when (paragraph.justification) {
+            1 -> TextAlignment.CENTER
+            2 -> TextAlignment.RIGHT
+            else -> TextAlignment.LEFT
+        }
+        val afterDots = (paragraph.spacingAfter / 20f * builder.paper.dpi / 72f)
+            .roundToInt().coerceIn(4, 36)
+        builder.addParagraph(
+            text = if (paragraph.isInList) "• $text" else text,
+            fontSize = fontSize,
+            weight = if (firstRun?.isBold == true) 700 else 400,
+            italic = firstRun?.isItalic == true,
+            underline = (firstRun?.underlineCode ?: 0) != 0,
+            alignment = alignment,
+            fontFamily = firstRun?.fontName.orEmpty().ifBlank { "sans-serif" },
+            afterDots = afterDots,
+        )
+    }
+
+    private fun addLegacyWordTable(table: Table, builder: FlowDocumentBuilder) {
+        val rows = (0 until table.numRows()).map { rowIndex ->
+            val row = table.getRow(rowIndex)
+            (0 until row.numCells()).map { cellIndex ->
+                row.getCell(cellIndex).text().cleanLegacyOfficeText()
+            }
+        }.filter { row -> row.any(String::isNotBlank) }
+        if (rows.isEmpty()) return
+        val columnCount = rows.maxOf { it.size }.coerceIn(1, 8)
+        rows.chunked(builder.tableRowCapacity()).forEach { pageRows ->
+            val data = pageRows.joinToString("\n") { row ->
+                List(columnCount) { index -> sanitizeCell(row.getOrElse(index) { "" }) }.joinToString("|")
+            }
+            builder.addTable(pageRows.size, columnCount, data)
+        }
+    }
+
+    private fun addLegacyPowerPointShape(
+        context: Context,
+        shape: HSLFShape,
+        builder: FlowDocumentBuilder,
+    ): Boolean = when (shape) {
+        is HSLFGroupShape -> shape.shapes.fold(false) { added, child ->
+            addLegacyPowerPointShape(context, child, builder) || added
+        }
+        is HSLFTextShape -> {
+            var added = false
+            shape.textParagraphs.forEach { paragraph ->
+                val text = paragraph.textRuns.joinToString("") { it.rawText }.cleanLegacyOfficeText()
+                if (text.isBlank()) return@forEach
+                val firstRun = paragraph.textRuns.firstOrNull { it.rawText.isNotBlank() }
+                val fontSize = ((firstRun?.fontSize ?: paragraph.defaultFontSize ?: 16.0) * builder.paper.dpi / 72.0)
+                    .toFloat().coerceIn(12f, 96f)
+                val alignment = when (paragraph.textAlign?.name) {
+                    "CENTER" -> TextAlignment.CENTER
+                    "RIGHT" -> TextAlignment.RIGHT
+                    else -> TextAlignment.LEFT
+                }
+                val bullet = paragraph.bulletChar?.let { "$it " }.orEmpty()
+                builder.addParagraph(
+                    text = bullet + text,
+                    fontSize = fontSize,
+                    weight = if (firstRun?.isBold == true) 700 else 400,
+                    italic = firstRun?.isItalic == true,
+                    underline = firstRun?.isUnderlined == true,
+                    alignment = alignment,
+                    fontFamily = firstRun?.fontFamily.orEmpty().ifBlank { "sans-serif" },
+                    afterDots = ((paragraph.spaceAfter ?: 4.0) * builder.paper.dpi / 72.0)
+                        .roundToInt().coerceIn(4, 36),
+                )
+                added = true
+            }
+            added
+        }
+        is HSLFPictureShape -> {
+            val picture = runCatching { shape.pictureData }.getOrNull() ?: return false
+            val extension = picture.contentType.toRasterExtension() ?: return false
+            val bytes = runCatching { picture.data }.getOrNull() ?: return false
+            val imageUri = CapturedMediaStore.saveImageBytes(
+                context,
+                bytes,
+                extension,
+                "legacy-ppt-media",
+            ).getOrNull() ?: return false
+            builder.addImage(imageUri, bytes)
+            true
+        }
+        else -> false
     }
 
     private fun addWordParagraph(
@@ -315,6 +526,7 @@ object OfficeDocumentImporter {
             italic: Boolean,
             underline: Boolean,
             alignment: TextAlignment,
+            fontFamily: String = "sans-serif",
             afterDots: Int,
         ) {
             val units = (width / (fontSize * 0.52f)).toInt().coerceAtLeast(2)
@@ -330,6 +542,7 @@ object OfficeDocumentImporter {
                     width = width,
                     height = height,
                     text = chunk.joinToString("\n"),
+                    fontFamily = fontFamily,
                     fontSizeDots = fontSize,
                     fontWeight = weight,
                     italic = italic,
@@ -516,6 +729,25 @@ object OfficeDocumentImporter {
     private fun Element.firstDescendant(localName: String): Element? = descendants(localName).firstOrNull()
 
     private fun sanitizeCell(value: String): String = value.replace('|', '¦').replace('\r', ' ').replace('\n', ' ')
+
+    private fun String.cleanLegacyOfficeText(): String =
+        replace('\u0007', ' ')
+            .replace('\u000b', '\n')
+            .replace('\u000c', '\n')
+            .replace("\r\n", "\n")
+            .replace('\r', '\n')
+            .trim()
+
+    private fun String.toRasterExtension(): String? = when (lowercase()) {
+        "image/png" -> "png"
+        "image/jpeg", "image/jpg" -> "jpg"
+        "image/gif" -> "gif"
+        "image/bmp", "image/x-ms-bmp" -> "bmp"
+        "image/webp" -> "webp"
+        else -> null
+    }
+
+    private val SUPPORTED_RASTER_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "bmp", "webp")
 }
 
 private fun String.baseName(): String = substringBeforeLast('.', this).ifBlank { "导入文档" }
