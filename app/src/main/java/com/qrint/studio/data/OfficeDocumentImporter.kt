@@ -1,8 +1,14 @@
 package com.qrint.studio.data
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
 import android.net.Uri
+import com.qrint.studio.model.DitherMode
 import com.qrint.studio.model.EditorFactories
 import com.qrint.studio.model.ElementKind
 import com.qrint.studio.model.ImageFit
@@ -13,6 +19,7 @@ import com.qrint.studio.model.PaperMode
 import com.qrint.studio.model.PaperSettings
 import com.qrint.studio.model.ShapeKind
 import com.qrint.studio.model.TextAlignment
+import com.qrint.studio.render.LabelRenderer
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipInputStream
@@ -31,7 +38,7 @@ import org.apache.poi.hwpf.usermodel.Table
 import org.w3c.dom.Element
 import org.w3c.dom.Node
 
-/** Offline structured Office importer. Output is normal editable canvas elements, not screenshots. */
+/** Offline Office importer. Word/Excel stay editable; PowerPoint is flattened per slide for layout fidelity. */
 object OfficeDocumentImporter {
     private const val MAX_FILE_BYTES = 96 * 1024 * 1024
     private const val MAX_UNCOMPRESSED_BYTES = 160 * 1024 * 1024
@@ -76,24 +83,35 @@ object OfficeDocumentImporter {
             .take(MAX_PAGES)
         require(slideEntries.isNotEmpty()) { "PPTX 中没有幻灯片" }
         val (slideWidth, slideHeight) = presentationSize(zip["ppt/presentation.xml"])
-        val documents = slideEntries.mapIndexed { pageIndex, slidePath ->
-            val slideRoot = parseXml(zip.getValue(slidePath)).documentElement
-            val relPath = slidePath.replace("slides/", "slides/_rels/") + ".rels"
-            val relationships = relationshipMap(zip[relPath], "ppt/slides")
-            pptSlideDocument(
-                context,
-                zip,
-                relationships,
-                slideRoot,
-                sourceName,
-                pageIndex + 1,
-                slideEntries.size,
-                slideWidth,
-                slideHeight,
-                paper,
-            )
+        val savedPages = mutableListOf<Uri>()
+        try {
+            val documents = slideEntries.mapIndexed { pageIndex, slidePath ->
+                val slideRoot = parseXml(zip.getValue(slidePath)).documentElement
+                val relPath = slidePath.replace("slides/", "slides/_rels/") + ".rels"
+                val relationships = relationshipMap(zip[relPath], "ppt/slides")
+                val editableSlide = pptSlideDocument(
+                    context,
+                    zip,
+                    relationships,
+                    slideRoot,
+                    sourceName,
+                    pageIndex + 1,
+                    slideEntries.size,
+                    slideWidth,
+                    slideHeight,
+                    paper,
+                )
+                flattenPowerPointSlide(
+                    context = context,
+                    editableSlide = editableSlide,
+                    targetHeight = pptTargetPageHeight(slideWidth, slideHeight, paper),
+                ).also { document -> document.singleImageUri()?.let(savedPages::add) }
+            }
+            ImportedDocumentBatch(sourceName, documents)
+        } catch (error: Throwable) {
+            savedPages.forEach { CapturedMediaStore.delete(context, it) }
+            throw error
         }
-        ImportedDocumentBatch(sourceName, documents)
     }
 
     /**
@@ -161,10 +179,18 @@ object OfficeDocumentImporter {
         sourceName: String,
         paper: PaperSettings,
     ): Result<ImportedDocumentBatch> = runCatching {
-        ByteArrayInputStream(readUri(context, uri)).use { stream ->
-            HSLFSlideShow(stream).use { show ->
+        val savedPages = mutableListOf<Uri>()
+        try {
+            ByteArrayInputStream(readUri(context, uri)).use { stream ->
+                HSLFSlideShow(stream).use { show ->
                 val slides = show.slides.take(MAX_PAGES)
                 require(slides.isNotEmpty()) { "旧版 PowerPoint/WPS 文稿中没有幻灯片" }
+                val legacyPageSize = show.pageSize
+                val targetPageHeight = fixedLayoutTargetPageHeight(
+                    legacyPageSize.width.toDouble(),
+                    legacyPageSize.height.toDouble(),
+                    paper,
+                )
                 val imported = slides.flatMapIndexed { slideIndex, slide ->
                     val slideTitle = "$sourceName · 幻灯片 ${slideIndex + 1}/${slides.size}"
                     val builder = FlowDocumentBuilder(slideTitle, paper)
@@ -184,14 +210,20 @@ object OfficeDocumentImporter {
                         )
                     }
                     builder.finish().mapIndexed { continuation, document ->
-                        document.copy(
+                        val titled = document.copy(
                             title = if (continuation == 0) slideTitle else "$slideTitle · 续 ${continuation + 1}",
                         )
+                        flattenPowerPointSlide(context, titled, targetPageHeight)
+                            .also { document -> document.singleImageUri()?.let(savedPages::add) }
                     }
                 }
                 require(imported.size <= MAX_PAGES) { "PowerPoint 分页超过 $MAX_PAGES 页，请拆分文稿" }
                 ImportedDocumentBatch(sourceName, imported)
+                }
             }
+        } catch (error: Throwable) {
+            savedPages.forEach { CapturedMediaStore.delete(context, it) }
+            throw error
         }
     }
 
@@ -428,52 +460,68 @@ object OfficeDocumentImporter {
         val scale = min(contentWidth.toDouble() / slideWidth, availableHeight.toDouble() / slideHeight)
         val startX = paper.printableStartX()
         val elements = mutableListOf<LabelElement>()
-        root.descendants("sp").forEach { shape ->
-            val box = pptBox(shape, scale, startX) ?: return@forEach
-            val text = collectOfficeText(shape).trim()
-            if (text.isNotBlank()) {
-                val runProperties = shape.firstDescendant("rPr") ?: shape.firstDescendant("defRPr")
-                val pointSize = runProperties?.attribute("sz")?.toFloatOrNull()?.div(100f)
-                val alignment = when (shape.firstDescendant("pPr")?.attribute("algn")) {
-                    "ctr" -> TextAlignment.CENTER
-                    "r" -> TextAlignment.RIGHT
-                    else -> TextAlignment.LEFT
+        root.descendantsInDocumentOrder(setOf("sp", "pic")).forEach { item ->
+            when (item.local()) {
+                "sp" -> {
+                    val box = pptBox(item, scale, startX) ?: return@forEach
+                    val text = collectOfficeText(item).trim()
+                    if (text.isNotBlank()) {
+                        val runProperties = item.firstDescendant("rPr") ?: item.firstDescendant("defRPr")
+                        val pointSize = runProperties?.attribute("sz")?.toFloatOrNull()?.div(100f)
+                        val alignment = when (item.firstDescendant("pPr")?.attribute("algn")) {
+                            "ctr" -> TextAlignment.CENTER
+                            "r" -> TextAlignment.RIGHT
+                            else -> TextAlignment.LEFT
+                        }
+                        elements += EditorFactories.textElement(box.left, box.top).copy(
+                            width = box.width,
+                            height = box.height,
+                            rotation = box.rotation,
+                            text = text,
+                            fontSizeDots = pptPointSizeToOutputDots(pointSize ?: 16f, scale),
+                            fontWeight = if (runProperties?.attribute("b") in setOf("1", "true")) 700 else 400,
+                            italic = runProperties?.attribute("i") in setOf("1", "true"),
+                            underline = runProperties?.attribute("u").orEmpty().let { it.isNotBlank() && it != "none" },
+                            textAlignment = alignment,
+                        )
+                    } else {
+                        val preset = item.firstDescendant("prstGeom")?.attribute("prst")
+                        val shapeKind = when (preset) {
+                            "ellipse" -> ShapeKind.ELLIPSE
+                            "roundRect" -> ShapeKind.ROUNDED_RECTANGLE
+                            "triangle" -> ShapeKind.TRIANGLE
+                            "diamond" -> ShapeKind.DIAMOND
+                            "line" -> ShapeKind.LINE
+                            else -> null
+                        }
+                        if (shapeKind != null) {
+                            elements += EditorFactories.shapeElement(shapeKind, box.left, box.top).copy(
+                                width = box.width,
+                                height = box.height,
+                                rotation = box.rotation,
+                            )
+                        }
+                    }
                 }
-                elements += EditorFactories.textElement(box.left, box.top).copy(
-                    width = box.width,
-                    height = box.height,
-                    text = text,
-                    fontSizeDots = ((pointSize ?: 16f) * paper.dpi / 72f).coerceIn(10f, 96f),
-                    fontWeight = if (runProperties?.attribute("b") in setOf("1", "true")) 700 else 400,
-                    italic = runProperties?.attribute("i") in setOf("1", "true"),
-                    underline = runProperties?.attribute("u").orEmpty().let { it.isNotBlank() && it != "none" },
-                    textAlignment = alignment,
-                )
-            } else {
-                val preset = shape.firstDescendant("prstGeom")?.attribute("prst")
-                val shapeKind = when (preset) {
-                    "ellipse" -> ShapeKind.ELLIPSE
-                    "roundRect" -> ShapeKind.ROUNDED_RECTANGLE
-                    "triangle" -> ShapeKind.TRIANGLE
-                    "diamond" -> ShapeKind.DIAMOND
-                    "line" -> ShapeKind.LINE
-                    else -> null
+                "pic" -> {
+                    val relationId = item.firstDescendant("blip")?.attribute("embed").orEmpty()
+                    val target = relationships[relationId] ?: return@forEach
+                    val bytes = zip[target] ?: return@forEach
+                    val box = pptBox(item, scale, startX) ?: return@forEach
+                    val uri = CapturedMediaStore.saveImageBytes(
+                        context,
+                        bytes,
+                        target.substringAfterLast('.', "png"),
+                        "pptx-media",
+                    ).getOrNull() ?: return@forEach
+                    elements += EditorFactories.imageElement(uri.toString(), box.left, box.top).copy(
+                        width = box.width,
+                        height = box.height,
+                        rotation = box.rotation,
+                        imageFit = ImageFit.STRETCH,
+                    )
                 }
-                if (shapeKind != null) elements += EditorFactories.shapeElement(shapeKind, box.left, box.top).copy(width = box.width, height = box.height)
             }
-        }
-        root.descendants("pic").forEach { picture ->
-            val relationId = picture.firstDescendant("blip")?.attribute("embed").orEmpty()
-            val target = relationships[relationId] ?: return@forEach
-            val bytes = zip[target] ?: return@forEach
-            val box = pptBox(picture, scale, startX) ?: return@forEach
-            val uri = CapturedMediaStore.saveImageBytes(context, bytes, target.substringAfterLast('.', "png"), "pptx-media")
-                .getOrNull() ?: return@forEach
-            elements += EditorFactories.imageElement(uri.toString(), box.left, box.top).copy(
-                width = box.width,
-                height = box.height,
-                imageFit = ImageFit.FIT,
-            )
         }
         return EditorFactories.blankDocument("${sourceName.baseName()} · 幻灯片 $page/$pages", paper).copy(
             category = "办公管理",
@@ -483,7 +531,20 @@ object OfficeDocumentImporter {
         ).normalized()
     }
 
-    private data class PptBox(val left: Int, val top: Int, val width: Int, val height: Int)
+    private data class PptBox(
+        val left: Int,
+        val top: Int,
+        val width: Int,
+        val height: Int,
+        val rotation: Float,
+    )
+
+    private data class PptRawBox(
+        val left: Double,
+        val top: Double,
+        val width: Double,
+        val height: Double,
+    )
 
     private fun pptBox(element: Element, scale: Double, startX: Int): PptBox? {
         val transform = element.firstDescendant("xfrm") ?: return null
@@ -493,11 +554,44 @@ object OfficeDocumentImporter {
         val y = offset.attribute("y").toLongOrNull() ?: return null
         val width = extent.attribute("cx").toLongOrNull() ?: return null
         val height = extent.attribute("cy").toLongOrNull() ?: return null
+        var raw = PptRawBox(x.toDouble(), y.toDouble(), width.toDouble(), height.toDouble())
+        var ancestor = element.parentNode
+        while (ancestor is Element) {
+            if (ancestor.local() == "grpSp") raw = mapPptGroupBox(raw, ancestor)
+            ancestor = ancestor.parentNode
+        }
         return PptBox(
-            left = startX + (x * scale).roundToInt(),
-            top = (y * scale).roundToInt(),
-            width = (width * scale).roundToInt().coerceAtLeast(16),
-            height = (height * scale).roundToInt().coerceAtLeast(16),
+            left = startX + (raw.left * scale).roundToInt(),
+            top = (raw.top * scale).roundToInt(),
+            width = (raw.width * scale).roundToInt().coerceAtLeast(16),
+            height = (raw.height * scale).roundToInt().coerceAtLeast(16),
+            rotation = transform.attribute("rot").toFloatOrNull()?.div(60_000f) ?: 0f,
+        )
+    }
+
+    /** Maps child coordinates through nested PPTX group transforms into slide coordinates. */
+    private fun mapPptGroupBox(child: PptRawBox, group: Element): PptRawBox {
+        val properties = group.childElements().firstOrNull { it.local() == "grpSpPr" } ?: return child
+        val transform = properties.firstDescendant("xfrm") ?: return child
+        val offset = transform.childElements().firstOrNull { it.local() == "off" } ?: return child
+        val extent = transform.childElements().firstOrNull { it.local() == "ext" } ?: return child
+        val childOffset = transform.childElements().firstOrNull { it.local() == "chOff" }
+        val childExtent = transform.childElements().firstOrNull { it.local() == "chExt" }
+        val offX = offset.attribute("x").toDoubleOrNull() ?: return child
+        val offY = offset.attribute("y").toDoubleOrNull() ?: return child
+        val extX = extent.attribute("cx").toDoubleOrNull() ?: return child
+        val extY = extent.attribute("cy").toDoubleOrNull() ?: return child
+        val childX = childOffset?.attribute("x")?.toDoubleOrNull() ?: 0.0
+        val childY = childOffset?.attribute("y")?.toDoubleOrNull() ?: 0.0
+        val childWidth = childExtent?.attribute("cx")?.toDoubleOrNull()?.takeIf { it != 0.0 } ?: extX
+        val childHeight = childExtent?.attribute("cy")?.toDoubleOrNull()?.takeIf { it != 0.0 } ?: extY
+        val scaleX = extX / childWidth
+        val scaleY = extY / childHeight
+        return PptRawBox(
+            left = offX + (child.left - childX) * scaleX,
+            top = offY + (child.top - childY) * scaleY,
+            width = child.width * scaleX,
+            height = child.height * scaleY,
         )
     }
 
@@ -506,6 +600,77 @@ object OfficeDocumentImporter {
         val size = parseXml(bytes).documentElement.firstDescendant("sldSz") ?: return 12_192_000L to 6_858_000L
         return (size.attribute("cx").toLongOrNull() ?: 12_192_000L) to
             (size.attribute("cy").toLongOrNull() ?: 6_858_000L)
+    }
+
+    private fun pptTargetPageHeight(slideWidth: Long, slideHeight: Long, paper: PaperSettings): Int {
+        return fixedLayoutTargetPageHeight(slideWidth.toDouble(), slideHeight.toDouble(), paper)
+    }
+
+    private fun fixedLayoutTargetPageHeight(
+        sourceWidth: Double,
+        sourceHeight: Double,
+        paper: PaperSettings,
+    ): Int {
+        require(sourceWidth > 0.0 && sourceHeight > 0.0) { "演示文稿页面尺寸无效" }
+        val contentWidth = paper.contentWidthDots().coerceAtLeast(32)
+        val heightLimit = if (paper.mode == PaperMode.LABEL) paper.fixedHeightDots() else MAX_DOCUMENT_HEIGHT_DOTS
+        val scale = min(contentWidth / sourceWidth, heightLimit / sourceHeight)
+        return if (paper.mode == PaperMode.LABEL) {
+            paper.fixedHeightDots()
+        } else {
+            (sourceHeight * scale).roundToInt().coerceIn(64, MAX_DOCUMENT_HEIGHT_DOTS)
+        }
+    }
+
+    /**
+     * PowerPoint is a fixed-layout format. Flattening the reconstructed slide into one bitmap keeps
+     * all text, pictures and shapes in the same coordinate system when the editor is reopened.
+     */
+    private fun flattenPowerPointSlide(
+        context: Context,
+        editableSlide: LabelDocument,
+        targetHeight: Int,
+    ): LabelDocument {
+        val rendered = LabelRenderer.render(context, editableSlide)
+        val paper = editableSlide.paper
+        val contentLeft = paper.printableStartX().coerceIn(0, rendered.bitmap.width - 1)
+        val contentWidth = paper.contentWidthDots()
+            .coerceAtMost(rendered.bitmap.width - contentLeft)
+            .coerceAtLeast(1)
+        val pageHeight = targetHeight.coerceIn(1, MAX_DOCUMENT_HEIGHT_DOTS)
+        val flattened = Bitmap.createBitmap(contentWidth, pageHeight, Bitmap.Config.RGB_565)
+        val intermediateMedia = editableSlide.elements
+            .asSequence()
+            .filter { it.kind == ElementKind.IMAGE && it.imageUri.isNotBlank() }
+            .mapNotNull { runCatching { Uri.parse(it.imageUri) }.getOrNull() }
+            .toList()
+        try {
+            val canvas = Canvas(flattened)
+            canvas.drawColor(Color.WHITE)
+            val copiedHeight = min(pageHeight, rendered.bitmap.height)
+            canvas.drawBitmap(
+                rendered.bitmap,
+                Rect(contentLeft, 0, contentLeft + contentWidth, copiedHeight),
+                Rect(0, 0, contentWidth, copiedHeight),
+                Paint(Paint.FILTER_BITMAP_FLAG),
+            )
+            val pageUri = CapturedMediaStore.saveBitmap(context, flattened, "powerpoint-page").getOrThrow()
+            return EditorFactories.blankDocument(editableSlide.title, paper).copy(
+                category = "办公管理",
+                elements = listOf(
+                    EditorFactories.imageElement(pageUri.toString(), paper.printableStartX(), 0).copy(
+                        width = contentWidth,
+                        height = pageHeight,
+                        imageFit = ImageFit.STRETCH,
+                        ditherMode = DitherMode.THRESHOLD,
+                    ),
+                ),
+            ).normalized()
+        } finally {
+            intermediateMedia.forEach { CapturedMediaStore.delete(context, it) }
+            if (!flattened.isRecycled) flattened.recycle()
+            if (!rendered.bitmap.isRecycled) rendered.bitmap.recycle()
+        }
     }
 
     private class FlowDocumentBuilder(private val sourceName: String, val paper: PaperSettings) {
@@ -718,7 +883,21 @@ object OfficeDocumentImporter {
         }
     }
 
+    private fun Element.descendantsInDocumentOrder(localNames: Set<String>): List<Element> = buildList {
+        fun visit(parent: Element) {
+            parent.childElements().forEach { child ->
+                if (child.local() in localNames) add(child)
+                visit(child)
+            }
+        }
+        visit(this@descendantsInDocumentOrder)
+    }
+
     private fun Element.firstDescendant(localName: String): Element? = descendants(localName).firstOrNull()
+
+    private fun LabelDocument.singleImageUri(): Uri? = elements.singleOrNull()
+        ?.takeIf { it.kind == ElementKind.IMAGE && it.imageUri.isNotBlank() }
+        ?.let { runCatching { Uri.parse(it.imageUri) }.getOrNull() }
 
     private fun sanitizeCell(value: String): String = value.replace('|', '¦').replace('\r', ' ').replace('\n', ' ')
 
@@ -741,5 +920,8 @@ object OfficeDocumentImporter {
 
     private val SUPPORTED_RASTER_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "bmp", "webp")
 }
+
+internal fun pptPointSizeToOutputDots(pointSize: Float, emuToDotsScale: Double): Float =
+    (pointSize.coerceAtLeast(1f) * 12_700.0 * emuToDotsScale).toFloat().coerceIn(8f, 96f)
 
 private fun String.baseName(): String = substringBeforeLast('.', this).ifBlank { "导入文档" }

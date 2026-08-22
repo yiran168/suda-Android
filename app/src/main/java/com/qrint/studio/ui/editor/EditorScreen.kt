@@ -796,7 +796,7 @@ fun EditorScreen(
                             color = MaterialTheme.colorScheme.tertiaryContainer,
                         ) {
                             Text(
-                                "页数 ${selectedDocumentPageIndices.size}/${documentBatch.size}",
+                                "编辑 ${activeDocumentPageIndex + 1}/${documentBatch.size} · 已选 ${selectedDocumentPageIndices.size}",
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                 style = MaterialTheme.typography.labelSmall,
                             )
