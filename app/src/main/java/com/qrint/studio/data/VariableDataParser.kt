@@ -15,7 +15,6 @@ import java.util.GregorianCalendar
 import java.util.Locale
 import java.util.TimeZone
 import java.util.zip.ZipInputStream
-import javax.xml.parsers.DocumentBuilderFactory
 import jxl.Workbook
 import jxl.WorkbookSettings
 import org.w3c.dom.Element
@@ -309,13 +308,7 @@ object VariableDataParser {
         }
     }
 
-    private fun parseXml(bytes: ByteArray) = DocumentBuilderFactory.newInstance().apply {
-        isNamespaceAware = false
-        isExpandEntityReferences = false
-        runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
-        runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
-        runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
-    }.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
+    private fun parseXml(bytes: ByteArray) = SafeXmlParser.parse(bytes, namespaceAware = false)
 
     private fun xlsxStyles(xml: ByteArray): XlsxStyles {
         val document = parseXml(xml)

@@ -16,7 +16,6 @@ import com.qrint.studio.model.TextAlignment
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.util.zip.ZipInputStream
-import javax.xml.parsers.DocumentBuilderFactory
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -682,14 +681,7 @@ object OfficeDocumentImporter {
         return stack.joinToString("/")
     }
 
-    private fun parseXml(bytes: ByteArray) = DocumentBuilderFactory.newInstance().apply {
-        isNamespaceAware = true
-        runCatching { setFeature("http://apache.org/xml/features/disallow-doctype-decl", true) }
-        runCatching { setFeature("http://xml.org/sax/features/external-general-entities", false) }
-        runCatching { setFeature("http://xml.org/sax/features/external-parameter-entities", false) }
-        isXIncludeAware = false
-        isExpandEntityReferences = false
-    }.newDocumentBuilder().parse(ByteArrayInputStream(bytes))
+    private fun parseXml(bytes: ByteArray) = SafeXmlParser.parse(bytes, namespaceAware = true)
 
     private fun collectOfficeText(element: Element): String = buildString { appendOfficeText(element, this) }
 
