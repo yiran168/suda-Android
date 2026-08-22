@@ -213,7 +213,7 @@ fun EditorScreen(
     var selectedDocumentPageIndices by remember(initialDocument.id) {
         mutableStateOf(initialBatchDocuments.indices.toSet())
     }
-    var showDocumentPages by remember(initialDocument.id) { mutableStateOf(initialBatchDocuments.size > 1) }
+    var showDocumentPages by remember(initialDocument.id) { mutableStateOf(false) }
     var variableRow by remember(initialDocument.id) { mutableIntStateOf(0) }
     var variableBatchRange by remember(initialDocument.id) {
         mutableStateOf(0..(initialVariableWorkbook?.defaultSheet?.rows?.lastIndex ?: 0))
@@ -229,6 +229,7 @@ fun EditorScreen(
     var pendingPhotoUriText by rememberSaveable(initialDocument.id) { mutableStateOf<String?>(null) }
     var launchPhotoAfterPermission by rememberSaveable(initialDocument.id) { mutableStateOf(false) }
     var pendingPhotoCropUriText by rememberSaveable(initialDocument.id) { mutableStateOf<String?>(null) }
+    var pendingPhotoCropReplacementId by rememberSaveable(initialDocument.id) { mutableStateOf<String?>(null) }
     var processingPhotoCrop by remember { mutableStateOf(false) }
     var pendingDecodedCode by remember { mutableStateOf<DecodedBarcode?>(null) }
     var pendingCodeMatches by remember { mutableStateOf<List<CodeTemplateMatch>>(emptyList()) }
@@ -307,26 +308,33 @@ fun EditorScreen(
         }
     }
 
-    fun addCapturedPhoto(uri: Uri, message: String) {
+    fun placeSelectedPhoto(uri: Uri, replacementId: String?, message: String) {
         workScope.launch {
-            val base = EditorFactories.imageElement(uri.toString(), y = nextY(session.document))
+            val replaced = replacementId?.let { id ->
+                session.document.elements.firstOrNull { it.id == id && it.kind == ElementKind.IMAGE }
+            }
+            val base = replaced?.copy(imageUri = uri.toString(), imageFit = ImageFit.FIT)
+                ?: EditorFactories.imageElement(uri.toString(), y = nextY(session.document))
             val dimensions = withContext(Dispatchers.IO) { ImageLoader.dimensions(context, uri.toString()) }
-            session.add(dimensions?.let { source -> fitImageToSource(base, source, session.document) } ?: base)
+            val fitted = dimensions?.let { source -> fitImageToSource(base, source, session.document) } ?: base
+            if (replaced == null) session.add(fitted) else session.update(fitted)
             snackbar.showSnackbar(message)
         }
     }
 
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let {
-            runCatching { context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-            val selected = session.selected?.takeIf { element -> element.kind == ElementKind.IMAGE }
-            val base = selected?.copy(imageUri = it.toString(), imageFit = ImageFit.FIT)
-                ?: EditorFactories.imageElement(it.toString(), y = nextY(session.document))
+        uri?.let { sharedUri ->
+            runCatching { context.contentResolver.takePersistableUriPermission(sharedUri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            val replacementId = session.selected?.takeIf { element -> element.kind == ElementKind.IMAGE }?.id
             workScope.launch {
-                val dimensions = withContext(Dispatchers.IO) { ImageLoader.dimensions(context, it.toString()) }
-                val fitted = dimensions?.let { source -> fitImageToSource(base, source, session.document) } ?: base
-                if (selected == null) session.add(fitted) else session.update(fitted)
-                if (dimensions == null) snackbar.showSnackbar("图片尺寸读取失败，已保留默认大小，可在下方手动缩放")
+                val imported = withContext(Dispatchers.IO) { CapturedMediaStore.importImage(context, sharedUri) }
+                imported.onSuccess { privateUri ->
+                    pendingPhotoCropReplacementId = replacementId
+                    pendingPhotoCropUriText = privateUri.toString()
+                    snackbar.showSnackbar("图片已读取，请使用整张图片或手绘圈选打印区域")
+                }.onFailure { error ->
+                    snackbar.showSnackbar("图片读取失败：${error.message ?: "文件无效"}")
+                }
             }
         }
     }
@@ -346,6 +354,7 @@ fun EditorScreen(
             } else workScope.launch {
                 val validation = withContext(Dispatchers.IO) { CapturedMediaStore.validateImage(context, uri) }
                 validation.onSuccess {
+                    pendingPhotoCropReplacementId = null
                     pendingPhotoCropUriText = uri.toString()
                     snackbar.showSnackbar("拍照完成，请选择整张照片或圈选打印区域")
                 }.onFailure { error ->
@@ -782,12 +791,12 @@ fun EditorScreen(
                     if (documentBatch.size > 1) {
                         Spacer(Modifier.width(7.dp))
                         Surface(
-                            onClick = { showDocumentPages = !showDocumentPages },
+                            onClick = { showDocumentPages = true },
                             shape = MaterialTheme.shapes.medium,
                             color = MaterialTheme.colorScheme.tertiaryContainer,
                         ) {
                             Text(
-                                "文档 ${activeDocumentPageIndex + 1}/${documentBatch.size}",
+                                "页数 ${selectedDocumentPageIndices.size}/${documentBatch.size}",
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
                                 style = MaterialTheme.typography.labelSmall,
                             )
@@ -801,12 +810,8 @@ fun EditorScreen(
                     }
                 }
 
-                AnimatedVisibility(
-                    visible = documentBatch.size > 1 && showDocumentPages,
-                    enter = fadeIn(tween(180)) + expandVertically(tween(260, easing = FastOutSlowInEasing)),
-                    exit = fadeOut(tween(120)) + shrinkVertically(tween(220, easing = FastOutSlowInEasing)),
-                ) {
-                    DocumentPagePanel(
+                if (documentBatch.size > 1 && showDocumentPages) {
+                    DocumentPageDialog(
                         pageCount = documentBatch.size,
                         activeIndex = activeDocumentPageIndex,
                         selectedIndices = selectedDocumentPageIndices,
@@ -818,6 +823,7 @@ fun EditorScreen(
                         },
                         onSelectAll = { selectedDocumentPageIndices = documentBatch.indices.toSet() },
                         onClearSelection = { selectedDocumentPageIndices = emptySet() },
+                        onDismissRequest = { showDocumentPages = false },
                     )
                 }
 
@@ -1051,14 +1057,20 @@ fun EditorScreen(
         )
     }
     pendingPhotoCropUriText?.let { uriText ->
-        val capturedUri = Uri.parse(uriText)
+        val sourceUri = Uri.parse(uriText)
+        val replacementId = pendingPhotoCropReplacementId
         PhotoCropSheet(
-            uri = capturedUri,
+            uri = sourceUri,
             processing = processingPhotoCrop,
             onUseAll = {
                 if (!processingPhotoCrop) {
                     pendingPhotoCropUriText = null
-                    addCapturedPhoto(capturedUri, "整张照片已加入画布")
+                    pendingPhotoCropReplacementId = null
+                    placeSelectedPhoto(
+                        sourceUri,
+                        replacementId,
+                        if (replacementId == null) "整张图片已加入画布" else "图片已替换",
+                    )
                 }
             },
             onUseCrop = { selection ->
@@ -1066,14 +1078,19 @@ fun EditorScreen(
                     processingPhotoCrop = true
                     workScope.launch {
                         val cropped = withContext(Dispatchers.IO) {
-                            CapturedPhotoCropper.cropFreehand(context, capturedUri, selection)
+                            CapturedPhotoCropper.cropFreehand(context, sourceUri, selection)
                         }
                         cropped.onSuccess { croppedUri ->
-                            CapturedMediaStore.delete(context, capturedUri)
+                            CapturedMediaStore.delete(context, sourceUri)
                             pendingPhotoCropUriText = null
-                            addCapturedPhoto(croppedUri, "手绘圈选区域已加入画布")
+                            pendingPhotoCropReplacementId = null
+                            placeSelectedPhoto(
+                                croppedUri,
+                                replacementId,
+                                if (replacementId == null) "手绘圈选区域已加入画布" else "圈选区域已替换原图片",
+                            )
                         }.onFailure { error ->
-                            snackbar.showSnackbar("照片裁切失败：${error.message ?: "无法读取照片"}")
+                            snackbar.showSnackbar("图片裁切失败：${error.message ?: "无法读取图片"}")
                         }
                         processingPhotoCrop = false
                     }
@@ -1081,8 +1098,9 @@ fun EditorScreen(
             },
             onDismiss = {
                 if (!processingPhotoCrop) {
-                    CapturedMediaStore.delete(context, capturedUri)
+                    CapturedMediaStore.delete(context, sourceUri)
                     pendingPhotoCropUriText = null
+                    pendingPhotoCropReplacementId = null
                 }
             },
         )

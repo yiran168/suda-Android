@@ -12,7 +12,7 @@ import com.qrint.studio.render.ImageLoader
 import kotlin.math.max
 import kotlin.math.roundToInt
 
-/** Crops the same EXIF-oriented pixels shown by [PhotoCropSheet]. */
+/** Crops the same EXIF-oriented pixels shown by [PhotoCropSheet] for camera and gallery sources. */
 internal object CapturedPhotoCropper {
     private const val EDITING_MAX_DIMENSION = 1_600
 
@@ -34,7 +34,7 @@ internal object CapturedPhotoCropper {
         selection: FreehandPhotoSelection,
     ): Result<Uri> = runCatching {
         require(selection.isUsable) { "请先用手指沿要打印的内容画一圈" }
-        val source = loadPreview(context, uri) ?: error("无法读取拍摄的照片")
+        val source = loadPreview(context, uri) ?: error("无法读取图片")
         var output: Bitmap? = null
         try {
             val bounds = selection.pixelBounds(source.width, source.height)

@@ -1,13 +1,18 @@
 package com.qrint.studio.ui.editor
 
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -35,7 +40,7 @@ internal fun selectedDocumentPages(
 ): List<LabelDocument> = pages.filterIndexed { index, _ -> index in selectedIndices }
 
 @Composable
-internal fun DocumentPagePanel(
+internal fun DocumentPageDialog(
     pageCount: Int,
     activeIndex: Int,
     selectedIndices: Set<Int>,
@@ -43,60 +48,80 @@ internal fun DocumentPagePanel(
     onTogglePage: (Int) -> Unit,
     onSelectAll: () -> Unit,
     onClearSelection: () -> Unit,
-    modifier: Modifier = Modifier,
+    onDismissRequest: () -> Unit,
 ) {
     if (pageCount <= 1) return
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.tertiaryContainer,
-        shape = MaterialTheme.shapes.large,
-    ) {
-        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { onOpenPage((activeIndex - 1).coerceAtLeast(0)) }, enabled = activeIndex > 0) {
-                    Text("上一页")
-                }
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        title = { Text("选择打印页数") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "正在编辑第 ${activeIndex + 1}/$pageCount 页",
-                    modifier = Modifier.weight(1f),
-                    style = MaterialTheme.typography.labelLarge,
-                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    "已选择 ${selectedIndices.size}/$pageCount 页。勾选需要打印的页，或进入任意一页继续编辑。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                TextButton(
-                    onClick = { onOpenPage((activeIndex + 1).coerceAtMost(pageCount - 1)) },
-                    enabled = activeIndex < pageCount - 1,
-                ) { Text("下一页") }
-            }
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text("打印页：", style = MaterialTheme.typography.labelMedium)
                 Row(
-                    Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    repeat(pageCount) { index ->
+                    OutlinedButton(onClick = onSelectAll, modifier = Modifier.weight(1f)) {
+                        Text("全部页")
+                    }
+                    TextButton(onClick = onClearSelection, modifier = Modifier.weight(1f)) {
+                        Text("清空")
+                    }
+                }
+                HorizontalDivider()
+                LazyColumn(
+                    modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    items((0 until pageCount).toList(), key = { it }) { index ->
+                        val selected = index in selectedIndices
+                        val active = index == activeIndex
                         Surface(
-                            onClick = { onOpenPage(index) },
-                            color = if (index == activeIndex) MaterialTheme.colorScheme.primaryContainer
-                            else MaterialTheme.colorScheme.surface,
-                            shape = MaterialTheme.shapes.medium,
+                            modifier = Modifier.fillMaxWidth().clickable { onTogglePage(index) },
+                            color = when {
+                                active -> MaterialTheme.colorScheme.primaryContainer
+                                selected -> MaterialTheme.colorScheme.secondaryContainer
+                                else -> MaterialTheme.colorScheme.surfaceContainerLow
+                            },
+                            shape = MaterialTheme.shapes.large,
                         ) {
                             Row(
-                                Modifier.padding(start = 5.dp, end = 8.dp),
+                                modifier = Modifier.fillMaxWidth().padding(end = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Checkbox(
-                                    checked = index in selectedIndices,
+                                    checked = selected,
                                     onCheckedChange = { onTogglePage(index) },
                                 )
-                                Text("${index + 1}", style = MaterialTheme.typography.labelMedium)
+                                Column(Modifier.weight(1f)) {
+                                    Text("第 ${index + 1} 页", style = MaterialTheme.typography.labelLarge)
+                                    if (active) {
+                                        Text(
+                                            "当前编辑页",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                    }
+                                }
+                                TextButton(
+                                    onClick = {
+                                        onOpenPage(index)
+                                        onDismissRequest()
+                                    },
+                                ) { Text(if (active) "返回编辑" else "编辑") }
                             }
                         }
                     }
                 }
-                OutlinedButton(onClick = onSelectAll) { Text("全选") }
-                TextButton(onClick = onClearSelection) { Text("清空") }
             }
-        }
-    }
+        },
+        confirmButton = {
+            Button(onClick = onDismissRequest) { Text("完成") }
+        },
+    )
 }

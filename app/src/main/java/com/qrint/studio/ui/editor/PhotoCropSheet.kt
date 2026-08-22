@@ -105,9 +105,9 @@ internal fun PhotoCropSheet(
                 .padding(horizontal = 18.dp).padding(bottom = 26.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text("手绘圈选照片内容", style = MaterialTheme.typography.headlineSmall)
+            Text("手绘圈选图片内容", style = MaterialTheme.typography.headlineSmall)
             Text(
-                "按住照片并沿要打印内容的边缘画一圈，松手后自动闭合；圈外内容会变成白色，也可以直接使用整张照片。",
+                "按住图片并沿要打印内容的边缘画一圈，松手后自动闭合；圈外内容会变成白色，也可以直接使用整张图片。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Box(
@@ -116,7 +116,7 @@ internal fun PhotoCropSheet(
             ) {
                 val currentBitmap = bitmap
                 if (currentBitmap == null) {
-                    if (loadFailed) Text("照片读取失败", color = Color.White)
+                    if (loadFailed) Text("图片读取失败", color = Color.White)
                     else CircularProgressIndicator()
                 } else {
                     Image(
