@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.qrint.studio.ui.components.BoundedMultilineTextField
 import com.qrint.studio.data.ProductLibraryStore
 import com.qrint.studio.data.ProductRecord
 import kotlinx.coroutines.launch
@@ -199,7 +200,16 @@ private fun ProductEditorDialog(
                     }
                 }
                 item { OutlinedTextField(brand, { brand = it }, label = { Text("品牌") }, singleLine = true, modifier = Modifier.fillMaxWidth()) }
-                item { OutlinedTextField(note, { note = it }, label = { Text("备注") }, minLines = 2, modifier = Modifier.fillMaxWidth()) }
+                item {
+                    BoundedMultilineTextField(
+                        value = note,
+                        onValueChange = { note = it },
+                        label = "备注",
+                        minLines = 2,
+                        maxLines = 5,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         },
         confirmButton = {

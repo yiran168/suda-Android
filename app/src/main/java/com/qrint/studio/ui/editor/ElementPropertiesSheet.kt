@@ -65,6 +65,7 @@ import com.qrint.studio.model.ShapeKind
 import com.qrint.studio.model.TextAlignment
 import com.qrint.studio.model.TextEnhancementMode
 import com.qrint.studio.render.BarcodeNormalizer
+import com.qrint.studio.ui.components.BoundedMultilineTextField
 import com.qrint.studio.ui.components.DraftNumberField
 import kotlin.math.roundToInt
 
@@ -180,11 +181,13 @@ private fun TextProperties(
     var scalingFont by remember(element.id) { mutableStateOf(false) }
     PropertyCard("内容与字体") {
         when (element.kind) {
-            ElementKind.DATE_TIME -> OutlinedTextField(
+            ElementKind.DATE_TIME -> BoundedMultilineTextField(
                 value = element.datePattern,
                 onValueChange = { onUpdate(element.copy(datePattern = it)) },
-                label = { Text("日期格式") },
-                supportingText = { Text("例如 yyyy-MM-dd HH:mm:ss") },
+                label = "日期格式",
+                supportingText = "例如 yyyy-MM-dd HH:mm:ss",
+                minLines = 1,
+                maxLines = 3,
                 modifier = Modifier.fillMaxWidth(),
             )
             ElementKind.SEQUENCE -> {
@@ -198,11 +201,12 @@ private fun TextProperties(
                     CompactText("后缀", element.sequenceSuffix, { onUpdate(element.copy(sequenceSuffix = it)) }, Modifier.weight(1f))
                 }
             }
-            else -> OutlinedTextField(
+            else -> BoundedMultilineTextField(
                 value = element.text,
                 onValueChange = { onUpdate(element.copy(text = it)) },
-                label = { Text("文字内容") },
+                label = "文字内容",
                 minLines = 2,
+                maxLines = 8,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -430,12 +434,13 @@ private fun BarcodeProperties(element: LabelElement, onUpdate: (LabelElement) ->
                 }
             }
         }
-        OutlinedTextField(
+        BoundedMultilineTextField(
             value = element.barcodeContent,
             onValueChange = { onUpdate(element.copy(barcodeContent = it)) },
-            label = { Text("编码内容") },
+            label = "编码内容",
             minLines = 2,
-            supportingText = { Text(normalized.notice) },
+            maxLines = 6,
+            supportingText = normalized.notice,
             modifier = Modifier.fillMaxWidth(),
         )
         EnumDropdown("码制", element.barcodeType, family, { it.label }) { selected ->
@@ -485,12 +490,13 @@ private fun TableProperties(element: LabelElement, onUpdate: (LabelElement) -> U
                 it.toIntOrNull()?.let { value -> onUpdate(element.copy(tableColumns = value.coerceIn(1, 8))) }
             }, Modifier.weight(1f))
         }
-        OutlinedTextField(
+        BoundedMultilineTextField(
             value = element.tableData,
             onValueChange = { onUpdate(element.copy(tableData = it)) },
-            label = { Text("表格内容") },
-            supportingText = { Text("每行换行，每个单元格用 | 分隔") },
+            label = "表格内容",
+            supportingText = "每行换行，每个单元格用 | 分隔",
             minLines = 3,
+            maxLines = 8,
             modifier = Modifier.fillMaxWidth(),
         )
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -548,6 +554,7 @@ private fun <T> EnumDropdown(label: String, value: T, options: List<T>, display:
     ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
         OutlinedTextField(
             value = display(value), onValueChange = {}, readOnly = true, label = { Text(label) },
+            singleLine = true,
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
             modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable, enabled = true).fillMaxWidth(),
         )

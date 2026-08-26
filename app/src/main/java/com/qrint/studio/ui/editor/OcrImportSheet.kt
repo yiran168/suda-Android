@@ -23,7 +23,6 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -38,6 +37,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.qrint.studio.ui.components.BoundedMultilineTextField
 import com.qrint.studio.data.OcrQualityStore
 import com.qrint.studio.model.PaperMode
 import com.qrint.studio.render.OfflineTextScan
@@ -107,10 +107,10 @@ fun OcrImportSheet(
                             checked = index in selected,
                             onCheckedChange = { checked -> if (checked) selected.add(index) else selected.remove(index) },
                         )
-                        OutlinedTextField(
+                        BoundedMultilineTextField(
                             value = edited[index],
                             onValueChange = { edited[index] = it },
-                            label = { Text("第 ${index + 1} 行 · ${line.width}×${line.height}") },
+                            label = "第 ${index + 1} 行 · ${line.width}×${line.height}",
                             minLines = 1,
                             maxLines = 4,
                             modifier = Modifier.weight(1f),
